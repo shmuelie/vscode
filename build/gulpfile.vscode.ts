@@ -584,6 +584,35 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 					.pipe(replace('@@FileExplorerContextMenuDLL@@', `${quality === 'stable' ? 'code' : 'code_insider'}_explorer_command_${arch}.dll`))
 					.pipe(rename(f => f.dirname = `appx/manifest`)));
 			}
+
+			// Process MSIX manifest template for full MSIX packaging
+			{
+				const msixVersion = `${version.replace(/-\w+$/, '').split('.').join('.')}.0`;
+				const msixPublisher = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US';
+				const msixContextMenuId = quality === 'stable' ? 'OpenWithCode' : 'OpenWithCodeInsiders';
+				const msixContextMenuClsid = (product as { win32ContextMenu?: Record<string, { clsid: string }> }).win32ContextMenu?.[arch]?.clsid ?? '';
+				const msixContextMenuDll = `${quality === 'stable' ? 'code' : 'code_insider'}_explorer_command_${arch}.dll`;
+				// Strip context menu extensions from manifest when no CLSID is configured (e.g. OSS builds)
+				const stripContextMenu = msixContextMenuClsid
+					? (s: string) => s.replace('<!-- @@CONTEXT_MENU_START@@ -->\n', '').replace('        <!-- @@CONTEXT_MENU_END@@ -->', '')
+					: (s: string) => s.replace(/\s*<!-- @@CONTEXT_MENU_START@@ -->[\s\S]*?<!-- @@CONTEXT_MENU_END@@ -->/, '');
+				result = es.merge(result, gulp.src('resources/win32/msix/AppxManifest.xml', { base: '.' })
+					.pipe(replace('@@MsixPackageName@@', product.win32AppUserModelId))
+					.pipe(replace('@@MsixPublisher@@', msixPublisher))
+					.pipe(replace('@@MsixPackageVersion@@', msixVersion))
+					.pipe(replace('@@MsixProcessorArchitecture@@', arch === 'arm64' ? 'arm64' : 'x64'))
+					.pipe(replace('@@MsixDisplayName@@', product.nameLong))
+					.pipe(replace('@@MsixDescription@@', product.win32NameVersion))
+					.pipe(replace('@@MsixApplicationId@@', product.win32RegValueName))
+					.pipe(replace('@@MsixExecutable@@', product.nameShort + '.exe'))
+					.pipe(replace('@@MsixUrlProtocol@@', product.urlProtocol))
+					.pipe(replace('@@MsixCliAlias@@', product.applicationName))
+					.pipe(replace('@@FileExplorerContextMenuID@@', msixContextMenuId))
+					.pipe(replace('@@FileExplorerContextMenuCLSID@@', msixContextMenuClsid))
+					.pipe(replace('@@FileExplorerContextMenuDLL@@', msixContextMenuDll))
+					.pipe(replace(/[\s\S]*/, (match: string) => stripContextMenu(match)))
+					.pipe(rename(f => f.dirname = `msix/manifest`)));
+			}
 		} else if (platform === 'linux') {
 			result = es.merge(result, gulp.src('resources/linux/bin/code.sh', { base: '.' })
 				.pipe(replace('@@PRODNAME@@', product.nameLong))
@@ -635,17 +664,37 @@ async function stripAuthenticodeSignature(filePath: string): Promise<void> {
 	});
 }
 
+// rcedit only operates on Windows PE binaries. Some dependencies (e.g. the
+// `@anthropic-ai/claude-agent-sdk` vendored `audio-capture.node`) ship native
+// binaries for every platform, so the `**/*.node` glob also matches Mach-O and
+// ELF files that rcedit cannot patch. Detect PE files by their `MZ` magic so we
+// skip the cross-platform binaries instead of failing the build.
+async function isWindowsPortableExecutable(filePath: string): Promise<boolean> {
+	let handle: fs.promises.FileHandle | undefined;
+	try {
+		handle = await fs.promises.open(filePath, 'r');
+		const { buffer, bytesRead } = await handle.read(Buffer.alloc(2), 0, 2, 0);
+		return bytesRead === 2 && buffer[0] === 0x4d && buffer[1] === 0x5a;
+	} finally {
+		await handle?.close();
+	}
+}
+
 function patchWin32DependenciesTask(destinationFolderName: string) {
 	const cwd = path.join(path.dirname(root), destinationFolderName);
 
 	return async () => {
 		const versionedResourcesFolder = util.getVersionedResourcesFolder('win32', commit!);
-		const deps = (await Promise.all([
+		const globbed = (await Promise.all([
 			glob('**/*.node', { cwd, ignore: 'extensions/node_modules/@parcel/watcher/**' }),
 			glob('**/rg.exe', { cwd }),
 			glob('**/tgrep.exe', { cwd }),
 			glob('**/*explorer_command*.dll', { cwd }),
 		])).flatMap(o => o);
+		// Skip non-PE binaries (e.g. darwin/linux vendored `.node` files) that rcedit cannot patch.
+		const deps = (await Promise.all(globbed.map(async dep =>
+			await isWindowsPortableExecutable(path.join(cwd, dep)) ? dep : undefined
+		))).filter((dep): dep is string => dep !== undefined);
 		const packageJson = JSON.parse(await fs.promises.readFile(path.join(cwd, versionedResourcesFolder, 'resources', 'app', 'package.json'), 'utf8'));
 		const product = JSON.parse(await fs.promises.readFile(path.join(cwd, versionedResourcesFolder, 'resources', 'app', 'product.json'), 'utf8'));
 		const baseVersion = packageJson.version.replace(/-.*$/, '');

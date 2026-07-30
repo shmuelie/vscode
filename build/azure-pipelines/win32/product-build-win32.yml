@@ -88,6 +88,14 @@ jobs:
           displayName: Publish agent SDK tarballs
           sbomEnabled: false
           condition: and(succeededOrFailed(), eq(variables['AGENT_SDK_TARBALLS_PRODUCED'], 'true'))
+        - output: pipelineArtifact
+          targetPath: $(Build.ArtifactStagingDirectory)/out/msix
+          artifactName: vscode_client_win32_$(VSCODE_ARCH)_msix
+          displayName: Publish MSIX package
+          sbomBuildDropPath: $(Agent.BuildDirectory)/VSCode-win32-$(VSCODE_ARCH)
+          sbomPackageName: "VS Code Windows $(VSCODE_ARCH) MSIX"
+          sbomPackageVersion: $(Build.SourceVersion)
+          condition: and(succeeded(), ne(variables['VSCODE_QUALITY'], 'exploration'))
       sdl:
         suppression:
           suppressionFile: $(Build.SourcesDirectory)\.config\guardian\.gdnsuppress

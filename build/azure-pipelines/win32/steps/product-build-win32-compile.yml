@@ -228,6 +228,16 @@ steps:
         Remove-Item -Path "$(Agent.BuildDirectory)/VSCode-win32-$(VSCODE_ARCH)/appx/manifest" -Recurse -Force
       displayName: Prepare appx package
 
+  # MSIX: Build the fully-packaged MSIX from the processed manifest and build output.
+  # The MSIX manifest template is processed during the Build client step above and placed
+  # under <build-out-dir>/msix/manifest. This step packs the entire application into an MSIX.
+  - ${{ if and(ne(parameters.VSCODE_CIBUILD, true), ne(parameters.VSCODE_QUALITY, 'exploration')) }}:
+    - powershell: |
+        . build/azure-pipelines/win32/exec.ps1
+        $ErrorActionPreference = "Stop"
+        exec { npm run gulp "vscode-win32-$(VSCODE_ARCH)-msix" }
+      displayName: Build MSIX package
+
   - powershell: |
       . build/azure-pipelines/win32/exec.ps1
       $ErrorActionPreference = "Stop"
@@ -356,6 +366,18 @@ steps:
 
         mkdir $(Build.ArtifactStagingDirectory)\out\web -Force
         mv .build\win32-$(VSCODE_ARCH)\vscode-server-win32-$(VSCODE_ARCH)-web.zip $(Build.ArtifactStagingDirectory)\out\web\vscode-server-win32-$(VSCODE_ARCH)-web.zip
+
+        # Move MSIX package if it exists
+        $MsixDir = ".build\win32-$(VSCODE_ARCH)\msix"
+        if (Test-Path $MsixDir) {
+          $MsixFiles = Get-ChildItem -Path $MsixDir -Filter "*.msix"
+          if ($MsixFiles) {
+            mkdir $(Build.ArtifactStagingDirectory)\out\msix -Force
+            foreach ($f in $MsixFiles) {
+              mv $f.FullName $(Build.ArtifactStagingDirectory)\out\msix\$($f.Name)
+            }
+          }
+        }
 
         echo "##vso[task.setvariable variable=VSCODE_VERSION]$Version"
       displayName: Move artifacts to out directory

@@ -51,7 +51,17 @@ function setupCurrentWorkingDirectory(): void {
 
 		// Windows: always set application folder as current working dir
 		if (process.platform === 'win32') {
-			process.chdir(path.dirname(process.execPath));
+			const appDir = path.dirname(process.execPath);
+
+			// MSIX packages install under `C:\Program Files\WindowsApps`, a protected
+			// location that denies `chdir` into it (EPERM) even though its files are
+			// readable. The attempt always fails there and, for the console CLI, prints a
+			// stack trace on every invocation, so skip it for packaged installs.
+			// `VSCODE_CWD` (captured above) preserves the launch directory for path
+			// resolution regardless of the process working directory.
+			if (!appDir.toLowerCase().includes('\\windowsapps\\')) {
+				process.chdir(appDir);
+			}
 		}
 	} catch (err) {
 		console.error(err);
@@ -125,6 +135,122 @@ function enableASARSupport(): void {
 }
 
 enableASARSupport();
+
+/**
+ * MSIX/packaged app: native module loading from `C:\Program Files\WindowsApps`
+ * is blocked for processes that do not carry the package identity. Chromium
+ * spawns all child/utility processes with `DESKTOP_APP_BREAKAWAY`, so the
+ * extension host, pty host, file watcher and shared process run WITHOUT package
+ * identity and `process.dlopen()` of a bundled `.node` fails with
+ * `Error: Access is denied` — even though the DACL grants the user read access
+ * (only code execution/`LoadLibrary` from `WindowsApps` is denied).
+ *
+ * Reading the file IS permitted, so we redirect native module loads to a
+ * per-user copy under the package's `LocalCache`. That location lives outside
+ * `WindowsApps` (so `LoadLibrary` is allowed) and is removed automatically when
+ * the package is uninstalled. The `.node` and its sibling files (some native
+ * addons load adjacent DLLs) are copied on first load and then `dlopen`ed from
+ * the copy.
+ *
+ * Only applies to the packaged app on Windows (i.e. installed under
+ * `WindowsApps`), never when running out of sources or from a normal install.
+ */
+function enableMsixNativeModuleRedirect(): void {
+	if (!isWindows) {
+		return;
+	}
+
+	if (!process.env['ELECTRON_RUN_AS_NODE'] && !process.versions['electron']) {
+		return; // only on Electron / Electron-as-node
+	}
+
+	if (process.env['VSCODE_DEV']) {
+		return; // no redirect when running out of sources
+	}
+
+	// `appRoot` is the `resources/app` folder; for an MSIX install it is nested
+	// under `...\WindowsApps\<packageFullName>\resources\app`.
+	const appRoot = path.dirname(import.meta.dirname);
+	const windowsAppsMarker = '\\windowsapps\\';
+	const markerIndex = appRoot.toLowerCase().indexOf(windowsAppsMarker);
+	if (markerIndex === -1) {
+		return; // not installed under WindowsApps => not a packaged app
+	}
+
+	const localAppData = process.env['LOCALAPPDATA'];
+	if (!localAppData) {
+		return;
+	}
+
+	// Derive the package full name (first path segment after `WindowsApps`) and
+	// the package family name (`<Name>_<PublisherId>`) from the install path,
+	// since a process without package identity cannot query them via Win32.
+	const packageRootEnd = markerIndex + windowsAppsMarker.length;
+	const packageFullName = appRoot.slice(packageRootEnd).split(/[\\/]/)[0];
+	const nameParts = packageFullName.split('_');
+	if (nameParts.length < 2) {
+		return;
+	}
+	const packageFamilyName = `${nameParts[0]}_${nameParts[nameParts.length - 1]}`;
+	const packageVersion = nameParts[1] || '0';
+
+	const packageRoot = appRoot.slice(0, packageRootEnd) + packageFullName;
+	const packageRootPrefix = (packageRoot + path.sep).toLowerCase();
+	// Keep the cache path SHORT: LoadLibrary/`process.dlopen` fails with
+	// "The filename or extension is too long." beyond MAX_PATH, and the package
+	// data path is already long. Mirror each native module's directory under a
+	// short hash of its in-package location (siblings stay together so adjacent
+	// dependency DLLs are copied alongside the `.node`).
+	const cacheRoot = path.join(localAppData, 'Packages', packageFamilyName, 'LocalCache', 'vscode-nm', packageVersion);
+
+	const stripNamespacePrefix = (p: string): string => p.startsWith('\\\\?\\') ? p.slice(4) : p;
+
+	// Small stable string hash (djb2) to keep the cache directory name short.
+	const shortHash = (value: string): string => {
+		let hash = 5381;
+		for (let i = 0; i < value.length; i++) {
+			hash = (((hash << 5) + hash) + value.charCodeAt(i)) >>> 0;
+		}
+		return hash.toString(16);
+	};
+
+	const ensureDirectoryCopied = (sourceDir: string, targetDir: string): void => {
+		if (fs.existsSync(targetDir)) {
+			return; // already materialized (this or another process copied it)
+		}
+		fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+		const tempDir = `${targetDir}.tmp-${process.pid}-${Date.now()}`;
+		fs.cpSync(sourceDir, tempDir, { recursive: true });
+		try {
+			fs.renameSync(tempDir, targetDir); // atomic publish
+		} catch (err) {
+			// A concurrent process may have published it first; clean up our temp copy.
+			try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ }
+			if (!fs.existsSync(targetDir)) {
+				throw err;
+			}
+		}
+	};
+
+	const originalDlopen = process.dlopen.bind(process);
+	process.dlopen = function (module: { exports: unknown }, filename: string, ...rest: unknown[]): void {
+		try {
+			const realPath = stripNamespacePrefix(filename);
+			if (realPath.toLowerCase().startsWith(packageRootPrefix)) {
+				const sourceDir = path.dirname(realPath);
+				const targetDir = path.join(cacheRoot, shortHash(sourceDir.slice(packageRootPrefix.length).toLowerCase()));
+				ensureDirectoryCopied(sourceDir, targetDir);
+				const targetPath = path.join(targetDir, path.basename(realPath));
+				return (originalDlopen as (module: { exports: unknown }, filename: string, ...rest: unknown[]) => void)(module, targetPath, ...rest);
+			}
+		} catch (err) {
+			console.error(`[vscode] MSIX native module redirect failed for '${filename}', falling back to in-package load:`, err);
+		}
+		return (originalDlopen as (module: { exports: unknown }, filename: string, ...rest: unknown[]) => void)(module, filename, ...rest);
+	} as typeof process.dlopen;
+}
+
+enableMsixNativeModuleRedirect();
 
 /**
  * Add support for redirecting the loading of node modules

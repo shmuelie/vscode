@@ -4,10 +4,16 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Lazy } from '../common/lazy.js';
+import { redirectExecutableOutOfWindowsApps } from './msixExecutableRedirect.js';
 
 const _rgDiskPath = new Lazy(async () => {
 	const m = await import('@vscode/ripgrep-universal');
-	return m.rgPath.replace(/\bnode_modules\.asar\b/, 'node_modules.asar.unpacked');
+	const rgPath = m.rgPath.replace(/\bnode_modules\.asar\b/, 'node_modules.asar.unpacked');
+
+	// For MSIX/packaged installs, the ripgrep executable lives under `C:\Program Files\WindowsApps`,
+	// which denies `CreateProcess` to the identity-less search host (spawn fails with EPERM).
+	// Redirect it to a runnable copy under the package's LocalCache. No-op for non-packaged installs.
+	return redirectExecutableOutOfWindowsApps(rgPath);
 });
 
 export function rgDiskPath(): Promise<string> {

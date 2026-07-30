@@ -17,11 +17,15 @@ async function main() {
 	// Start the code sign processes in parallel
 	// 1. Codesign executables and shared libraries
 	// 2. Codesign Powershell scripts
-	// 3. Codesign context menu appx package (insiders only)
+	// 3. Codesign context menu appx package (non-exploration only)
+	// 4. Codesign MSIX package (non-exploration only)
 	const codesignTask1 = spawnCodesignProcess(esrpCliDLLPath, 'sign-windows', codeSigningFolderPath, '*.dll,*.exe,*.node');
 	const codesignTask2 = spawnCodesignProcess(esrpCliDLLPath, 'sign-windows-appx', codeSigningFolderPath, '*.ps1,*.psm1,*.psd1,*.ps1xml');
 	const codesignTask3 = process.env['VSCODE_QUALITY'] !== 'exploration'
 		? spawnCodesignProcess(esrpCliDLLPath, 'sign-windows-appx', codeSigningFolderPath, '*.appx')
+		: undefined;
+	const codesignTask4 = process.env['VSCODE_QUALITY'] !== 'exploration'
+		? spawnCodesignProcess(esrpCliDLLPath, 'sign-windows-appx', codeSigningFolderPath, '*.msix')
 		: undefined;
 
 	// Codesign executables and shared libraries
@@ -36,6 +40,12 @@ async function main() {
 		// Codesign context menu appx package
 		printBanner('Codesign context menu appx package');
 		await streamProcessOutputAndCheckResult('Codesign context menu appx package', codesignTask3);
+	}
+
+	if (codesignTask4) {
+		// Codesign MSIX package
+		printBanner('Codesign MSIX package');
+		await streamProcessOutputAndCheckResult('Codesign MSIX package', codesignTask4);
 	}
 
 	// Create build artifact directory

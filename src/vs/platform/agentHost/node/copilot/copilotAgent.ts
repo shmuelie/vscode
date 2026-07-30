@@ -23,6 +23,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { StopWatch } from '../../../../base/common/stopwatch.js';
 import { rgDiskPath } from '../../../../base/node/ripgrep.js';
+import { redirectDirectoryOutOfWindowsApps } from '../../../../base/node/msixExecutableRedirect.js';
 import { localize } from '../../../../nls.js';
 import { IParsedAgent, IParsedPlugin, IParsedRule, IParsedSkill, parseAgentFile, parsePlugin, parseRuleFile, parseSkillFile, PluginFormat } from '../../../agentPlugins/common/pluginParsers.js';
 import { IFileService } from '../../../files/common/files.js';
@@ -1666,7 +1667,10 @@ export class CopilotAgent extends Disposable implements IAgent {
 			// at `<nodeModules>/@microsoft/mxc-sdk/bin/<arch>/`, so point `MXC_BIN_DIR` there.
 			// The @github/copilot package's own `mxc-bin/` is excluded from the product build
 			// (see build/.moduleignore), mirroring `CopilotCLISDK.getPackage` in the extension.
-			env['MXC_BIN_DIR'] = URI.joinPath(nodeModulesUri, '@microsoft', 'mxc-sdk', 'bin').fsPath;
+			// For MSIX/packaged installs the identity-less CLI subprocess cannot `CreateProcess`
+			// these binaries from `WindowsApps` (spawn EPERM), so redirect the directory to a
+			// runnable copy under the package LocalCache. No-op for non-packaged installs.
+			env['MXC_BIN_DIR'] = redirectDirectoryOutOfWindowsApps(URI.joinPath(nodeModulesUri, '@microsoft', 'mxc-sdk', 'bin').fsPath);
 
 			// Add VS Code's built-in ripgrep to PATH so the CLI subprocess can find it.
 			const resolvedRgDiskPath = await rgDiskPath();

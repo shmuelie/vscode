@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap2="http://schemas.microsoft.com/appx/manifest/uap/windows10/2"
+  xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:desktop6="http://schemas.microsoft.com/appx/manifest/desktop/windows10/6"
+  xmlns:desktop10="http://schemas.microsoft.com/appx/manifest/desktop/windows10/10"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  IgnorableNamespaces="uap uap2 uap3 uap10 rescap desktop desktop4 desktop5 desktop6 desktop10 com">
+
+  <Identity
+    Name="@@MsixPackageName@@"
+    Publisher="@@MsixPublisher@@"
+    Version="@@MsixPackageVersion@@"
+    ProcessorArchitecture="@@MsixProcessorArchitecture@@" />
+
+  <Properties>
+    <DisplayName>@@MsixDisplayName@@</DisplayName>
+    <PublisherDisplayName>Microsoft Corporation</PublisherDisplayName>
+    <Logo>resources\app\resources\win32\code_150x150.png</Logo>
+    <Description>@@MsixDescription@@</Description>
+    <desktop6:RegistryWriteVirtualization>disabled</desktop6:RegistryWriteVirtualization>
+    <desktop6:FileSystemWriteVirtualization>disabled</desktop6:FileSystemWriteVirtualization>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+    <Resource Language="es-es" />
+    <Resource Language="de-de" />
+    <Resource Language="fr-fr" />
+    <Resource Language="hu-hu" />
+    <Resource Language="it-it" />
+    <Resource Language="ja-jp" />
+    <Resource Language="ko-kr" />
+    <Resource Language="pt-br" />
+    <Resource Language="ru-ru" />
+    <Resource Language="tr-tr" />
+    <Resource Language="zh-cn" />
+    <Resource Language="zh-tw" />
+  </Resources>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="unvirtualizedResources" />
+    <DeviceCapability Name="microphone" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="@@MsixApplicationId@@"
+      Executable="@@MsixExecutable@@"
+      uap10:TrustLevel="mediumIL"
+      uap10:RuntimeBehavior="win32App">
+
+      <uap:VisualElements
+        DisplayName="@@MsixDisplayName@@"
+        Description="@@MsixDescription@@"
+        BackgroundColor="transparent"
+        Square150x150Logo="resources\app\resources\win32\code_150x150.png"
+        Square44x44Logo="resources\app\resources\win32\code_70x70.png">
+        <uap:DefaultTile Wide310x150Logo="resources\app\resources\win32\code_150x150.png" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- URL Protocol Handler -->
+        <uap:Extension Category="windows.protocol">
+          <uap:Protocol Name="@@MsixUrlProtocol@@">
+            <uap:DisplayName>@@MsixDisplayName@@</uap:DisplayName>
+          </uap:Protocol>
+        </uap:Extension>
+
+        <!-- @@CONTEXT_MENU_START@@ -->
+        <!-- File Explorer Context Menus -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="@@FileExplorerContextMenuID@@" Clsid="@@FileExplorerContextMenuCLSID@@" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="Directory\Background">
+              <desktop5:Verb Id="@@FileExplorerContextMenuID@@" Clsid="@@FileExplorerContextMenuCLSID@@" />
+            </desktop5:ItemType>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="@@FileExplorerContextMenuID@@" Clsid="@@FileExplorerContextMenuCLSID@@" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+
+        <!-- COM Server for Context Menu -->
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="@@MsixDisplayName@@">
+              <com:Class Id="@@FileExplorerContextMenuCLSID@@" Path="@@FileExplorerContextMenuDLL@@" ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+        <!-- @@CONTEXT_MENU_END@@ -->
+
+        <!-- File Type Associations (generated in gulpfile.vscode.win32.msix.ts) -->
+@@FILE_TYPE_ASSOCIATIONS@@
+      </Extensions>
+    </Application>
+
+    <!--
+      Console launcher application for command-line use. The app execution alias must target a
+      package executable and launches it with the user's arguments verbatim, so it cannot point at
+      the GUI Code.exe (no console stdout / no CLI argument handling). It instead targets the
+      console-subsystem `codecli.exe` stub, which re-launches `Code.exe out/cli.js` in Node mode.
+      This application is hidden from the Start menu (AppListEntry="none").
+    -->
+    <Application Id="@@MsixApplicationId@@Cli"
+      Executable="codecli.exe"
+      uap10:TrustLevel="mediumIL"
+      uap10:RuntimeBehavior="win32App">
+
+      <uap:VisualElements
+        AppListEntry="none"
+        DisplayName="@@MsixDisplayName@@"
+        Description="@@MsixDescription@@"
+        BackgroundColor="transparent"
+        Square150x150Logo="resources\app\resources\win32\code_150x150.png"
+        Square44x44Logo="resources\app\resources\win32\code_70x70.png" />
+
+      <Extensions>
+        <!-- App Execution Alias (CLI access from PATH) -->
+        <uap3:Extension Category="windows.appExecutionAlias">
+          <uap3:AppExecutionAlias>
+            <desktop:ExecutionAlias Alias="@@MsixCliAlias@@.exe" />
+          </uap3:AppExecutionAlias>
+        </uap3:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+</Package>
