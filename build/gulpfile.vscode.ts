@@ -11,6 +11,7 @@ import vfs from 'vinyl-fs';
 import electron from '@vscode/gulp-electron';
 import * as util from './lib/util.ts';
 import { getVersion } from './lib/getVersion.ts';
+import { getMsixContextMenuConfiguration } from './lib/msixContextMenu.ts';
 import { readISODate, writeISODate } from './lib/date.ts';
 import * as task from './lib/gulp/task.ts';
 import buildfile from './buildfile.ts';
@@ -589,11 +590,9 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 			{
 				const msixVersion = `${version.replace(/-\w+$/, '').split('.').join('.')}.0`;
 				const msixPublisher = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US';
-				const msixContextMenuId = quality === 'stable' ? 'OpenWithCode' : 'OpenWithCodeInsiders';
-				const msixContextMenuClsid = (product as { win32ContextMenu?: Record<string, { clsid: string }> }).win32ContextMenu?.[arch]?.clsid ?? '';
-				const msixContextMenuDll = `${quality === 'stable' ? 'code' : 'code_insider'}_explorer_command_${arch}.dll`;
+				const msixContextMenu = getMsixContextMenuConfiguration(product, arch);
 				// Strip context menu extensions from manifest when no CLSID is configured (e.g. OSS builds)
-				const stripContextMenu = msixContextMenuClsid
+				const stripContextMenu = msixContextMenu
 					? (s: string) => s.replace('<!-- @@CONTEXT_MENU_START@@ -->\n', '').replace('        <!-- @@CONTEXT_MENU_END@@ -->', '')
 					: (s: string) => s.replace(/\s*<!-- @@CONTEXT_MENU_START@@ -->[\s\S]*?<!-- @@CONTEXT_MENU_END@@ -->/, '');
 				result = es.merge(result, gulp.src('resources/win32/msix/AppxManifest.xml', { base: '.' })
@@ -607,9 +606,9 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 					.pipe(replace('@@MsixExecutable@@', product.nameShort + '.exe'))
 					.pipe(replace('@@MsixUrlProtocol@@', product.urlProtocol))
 					.pipe(replace('@@MsixCliAlias@@', product.applicationName))
-					.pipe(replace('@@FileExplorerContextMenuID@@', msixContextMenuId))
-					.pipe(replace('@@FileExplorerContextMenuCLSID@@', msixContextMenuClsid))
-					.pipe(replace('@@FileExplorerContextMenuDLL@@', msixContextMenuDll))
+					.pipe(replace('@@FileExplorerContextMenuID@@', msixContextMenu?.id ?? ''))
+					.pipe(replace('@@FileExplorerContextMenuCLSID@@', msixContextMenu?.clsid ?? ''))
+					.pipe(replace('@@FileExplorerContextMenuDLL@@', msixContextMenu?.dllName ?? ''))
 					.pipe(replace(/[\s\S]*/, (match: string) => stripContextMenu(match)))
 					.pipe(rename(f => f.dirname = `msix/manifest`)));
 			}

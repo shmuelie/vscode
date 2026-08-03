@@ -5,23 +5,20 @@
 
 import * as cp from 'child_process';
 import * as fs from 'fs';
-import gulp from 'gulp';
 import * as path from 'path';
 import pkg from '../package.json' with { type: 'json' };
 import product from '../product.json' with { type: 'json' };
-import { getVersion } from './lib/getVersion.ts';
 import * as task from './lib/gulp/task.ts';
+import { getMsixContextMenuConfiguration, type IMsixContextMenuConfiguration } from './lib/msixContextMenu.ts';
 import * as util from './lib/util.ts';
 
 const repoPath = path.dirname(import.meta.dirname);
-const commit = getVersion(repoPath);
 const buildPath = (arch: string) => path.join(path.dirname(repoPath), `VSCode-win32-${arch}`);
 const msixDir = (arch: string) => path.join(repoPath, '.build', `win32-${arch}`, 'msix');
 
 type ProductWithExtras = typeof product & {
 	quality?: string;
 	win32NameVersion?: string;
-	win32ContextMenu?: Record<string, { clsid: string }>;
 };
 
 /**
@@ -107,6 +104,201 @@ function buildFileTypeAssociations(): string {
 /** Maps a group's `.ico` logo name to the `.png` name used in the manifest. */
 function logoPngName(icoName: string): string {
 	return icoName.replace(/\.ico$/, '.png');
+}
+
+function escapeCppString(value: string): string {
+	return value
+		.replaceAll('\\', '\\\\')
+		.replaceAll('"', '\\"')
+		.replaceAll('\r', '\\r')
+		.replaceAll('\n', '\\n');
+}
+
+function findVisualStudioInstallation(arch: string): string {
+	const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+	const vswherePath = path.join(programFilesX86, 'Microsoft Visual Studio', 'Installer', 'vswhere.exe');
+	if (!fs.existsSync(vswherePath)) {
+		throw new Error(`vswhere.exe not found at ${vswherePath}; cannot compile the MSIX context menu DLL.`);
+	}
+
+	const requiredComponent = arch === 'arm64'
+		? 'Microsoft.VisualStudio.Component.VC.Tools.ARM64'
+		: 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64';
+	const result = cp.spawnSync(
+		vswherePath,
+		['-latest', '-products', '*', '-requires', requiredComponent, '-property', 'installationPath'],
+		{ encoding: 'utf8' }
+	);
+	if (result.status !== 0 || !result.stdout.trim()) {
+		throw new Error(`A Visual Studio installation with ${requiredComponent} was not found.`);
+	}
+
+	return result.stdout.trim();
+}
+
+function guidToLittleEndianBytes(guid: string): Buffer {
+	const parts = guid.split('-');
+	return Buffer.from([
+		...Buffer.from(parts[0], 'hex').reverse(),
+		...Buffer.from(parts[1], 'hex').reverse(),
+		...Buffer.from(parts[2], 'hex').reverse(),
+		...Buffer.from(parts[3], 'hex'),
+		...Buffer.from(parts[4], 'hex'),
+	]);
+}
+
+function getPeMachine(dllPath: string): number {
+	const dll = fs.readFileSync(dllPath);
+	const peOffset = dll.readUInt32LE(0x3c);
+	if (dll.toString('ascii', peOffset, peOffset + 4) !== 'PE\0\0') {
+		throw new Error(`MSIX context menu DLL is not a valid PE file: ${dllPath}`);
+	}
+
+	return dll.readUInt16LE(peOffset + 4);
+}
+
+function validateMsixContextMenuDll(
+	dllPath: string,
+	arch: string,
+	configuration: IMsixContextMenuConfiguration,
+	buildDirectory: string
+): void {
+	if (!fs.existsSync(dllPath)) {
+		throw new Error(`MSIX context menu DLL was not produced at ${dllPath}.`);
+	}
+
+	const expectedMachine = arch === 'arm64' ? 0xaa64 : 0x8664;
+	const actualMachine = getPeMachine(dllPath);
+	if (actualMachine !== expectedMachine) {
+		throw new Error(
+			`MSIX context menu DLL has PE machine 0x${actualMachine.toString(16)}, expected 0x${expectedMachine.toString(16)} for ${arch}.`
+		);
+	}
+
+	const dll = fs.readFileSync(dllPath);
+	if (dll.indexOf(guidToLittleEndianBytes(configuration.clsid)) === -1) {
+		throw new Error(`MSIX context menu DLL does not embed CLSID ${configuration.clsid}.`);
+	}
+
+	const exports = fs.readFileSync(path.join(buildDirectory, 'exports.txt'), 'utf8');
+	for (const requiredExport of ['DllCanUnloadNow', 'DllGetActivationFactory', 'DllGetClassObject']) {
+		if (!exports.includes(requiredExport)) {
+			throw new Error(`MSIX context menu DLL is missing required export ${requiredExport}.`);
+		}
+	}
+
+	const dependents = fs.readFileSync(path.join(buildDirectory, 'dependents.txt'), 'utf8');
+	if (/\b(?:(?:msvcp|vcruntime)\d+[^ \r\n]*|ucrtbase|api-ms-win-crt-[^ \r\n]+)\.dll\b/i.test(dependents)) {
+		throw new Error(`MSIX context menu DLL dynamically imports the MSVC runtime:\n${dependents}`);
+	}
+
+	const imports = fs.readFileSync(path.join(buildDirectory, 'imports.txt'), 'utf8');
+	if (!imports.includes('GetCurrentPackagePath')) {
+		throw new Error('MSIX context menu DLL does not import GetCurrentPackagePath.');
+	}
+}
+
+function compileMsixContextMenuDll(
+	layoutPath: string,
+	arch: string,
+	configuration: IMsixContextMenuConfiguration
+): void {
+	const sourceDirectory = path.join(repoPath, 'build', 'win32', 'msix', 'explorer-command');
+	const sourcePath = path.join(sourceDirectory, 'explorerCommand.cpp');
+	const moduleDefinitionPath = path.join(sourceDirectory, 'explorerCommand.def');
+	if (!fs.existsSync(sourcePath) || !fs.existsSync(moduleDefinitionPath)) {
+		throw new Error(`MSIX context menu source files were not found under ${sourceDirectory}.`);
+	}
+
+	const buildDirectory = path.join(msixDir(arch), 'explorer-command');
+	fs.rmSync(buildDirectory, { recursive: true, force: true });
+	fs.mkdirSync(buildDirectory, { recursive: true });
+
+	const generatedHeaderPath = path.join(buildDirectory, 'generatedConfig.h');
+	fs.writeFileSync(generatedHeaderPath, [
+		'#pragma once',
+		`#define MSIX_CONTEXT_MENU_CLSID "${escapeCppString(configuration.clsid)}"`,
+		`#define MSIX_CONTEXT_MENU_TITLE L"${escapeCppString(configuration.title)}"`,
+		`#define MSIX_EXECUTABLE_NAME L"${escapeCppString(configuration.executableName)}"`,
+		'',
+	].join('\r\n'));
+
+	const visualStudioPath = findVisualStudioInstallation(arch);
+	const vsDevCmdPath = path.join(visualStudioPath, 'Common7', 'Tools', 'VsDevCmd.bat');
+	if (!fs.existsSync(vsDevCmdPath)) {
+		throw new Error(`VsDevCmd.bat not found at ${vsDevCmdPath}.`);
+	}
+
+	const outputPath = path.join(layoutPath, configuration.dllName);
+	const targetArch = arch === 'arm64' ? 'arm64' : 'x64';
+	const hostArch = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x64' : undefined;
+	if (!hostArch) {
+		throw new Error(`Unsupported MSIX context menu build host architecture: ${process.arch}`);
+	}
+	const machine = arch === 'arm64' ? 'ARM64' : 'X64';
+	const commandPath = path.join(buildDirectory, 'build.cmd');
+	const quote = (value: string): string => `"${value}"`;
+	fs.writeFileSync(commandPath, [
+		'@echo off',
+		`cd /d ${quote(buildDirectory)}`,
+		`set "PATH=${path.dirname(path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Microsoft Visual Studio', 'Installer', 'vswhere.exe'))};%PATH%"`,
+		`call ${quote(vsDevCmdPath)} -no_logo -arch=${targetArch} -host_arch=${hostArch}`,
+		'if errorlevel 1 exit /b %errorlevel%',
+		[
+			'cl.exe',
+			'/nologo',
+			'/LD',
+			'/MT',
+			'/O2',
+			'/Oi',
+			'/GL',
+			'/Gy',
+			'/guard:cf',
+			'/EHsc',
+			'/std:c++17',
+			'/permissive-',
+			'/utf-8',
+			'/W4',
+			'/WX',
+			'/wd4324',
+			'/DUNICODE',
+			'/D_UNICODE',
+			`/I${quote(buildDirectory)}`,
+			`/Fo${quote(path.join(buildDirectory, 'explorerCommand.obj'))}`,
+			quote(sourcePath),
+			'/link',
+			'/LTCG',
+			'/OPT:REF',
+			'/OPT:ICF',
+			'/guard:cf',
+			`/MACHINE:${machine}`,
+			`/DEF:${quote(moduleDefinitionPath)}`,
+			`/OUT:${quote(outputPath)}`,
+			`/IMPLIB:${quote(path.join(buildDirectory, 'explorerCommand.lib'))}`,
+			`/PDB:${quote(path.join(buildDirectory, 'explorerCommand.pdb'))}`,
+			'shlwapi.lib',
+			'shell32.lib',
+			'ole32.lib',
+			'runtimeobject.lib',
+		].join(' '),
+		'if errorlevel 1 exit /b %errorlevel%',
+		`dumpbin.exe /exports ${quote(outputPath)} > ${quote(path.join(buildDirectory, 'exports.txt'))}`,
+		'if errorlevel 1 exit /b %errorlevel%',
+		`dumpbin.exe /dependents ${quote(outputPath)} > ${quote(path.join(buildDirectory, 'dependents.txt'))}`,
+		'if errorlevel 1 exit /b %errorlevel%',
+		`dumpbin.exe /imports ${quote(outputPath)} > ${quote(path.join(buildDirectory, 'imports.txt'))}`,
+		'exit /b %errorlevel%',
+	].join('\r\n'));
+
+	const result = cp.spawnSync(process.env['ComSpec'] || 'cmd.exe', ['/d', '/c', commandPath], {
+		cwd: buildDirectory,
+		stdio: ['ignore', 'inherit', 'inherit'],
+	});
+	if (result.status !== 0) {
+		throw new Error(`Failed to compile the MSIX context menu DLL (exit code ${result.status}).`);
+	}
+
+	validateMsixContextMenuDll(outputPath, arch, configuration, buildDirectory);
 }
 
 /**
@@ -219,15 +411,12 @@ function getMsixVersion(): string {
  * with values derived from product.json and build configuration.
  */
 function prepareMsixManifest(arch: string): string {
-	const quality = (product as ProductWithExtras).quality || 'dev';
 	const templatePath = path.join(repoPath, 'resources', 'win32', 'msix', 'AppxManifest.xml');
 	let manifest = fs.readFileSync(templatePath, 'utf8');
 
 	const publisher = 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US';
 	const processorArch = arch === 'arm64' ? 'arm64' : 'x64';
-	const contextMenuId = quality === 'stable' ? 'OpenWithCode' : 'OpenWithCodeInsiders';
-	const contextMenuClsid = (product as ProductWithExtras).win32ContextMenu?.[arch]?.clsid ?? '';
-	const contextMenuDll = `${quality === 'stable' ? 'code' : 'code_insider'}_explorer_command_${arch}.dll`;
+	const contextMenu = getMsixContextMenuConfiguration(product, arch);
 
 	const replacements: Record<string, string> = {
 		'@@MsixPackageName@@': product.win32AppUserModelId,
@@ -240,9 +429,9 @@ function prepareMsixManifest(arch: string): string {
 		'@@MsixExecutable@@': `${product.nameShort}.exe`,
 		'@@MsixUrlProtocol@@': product.urlProtocol,
 		'@@MsixCliAlias@@': product.applicationName,
-		'@@FileExplorerContextMenuID@@': contextMenuId,
-		'@@FileExplorerContextMenuCLSID@@': contextMenuClsid,
-		'@@FileExplorerContextMenuDLL@@': contextMenuDll,
+		'@@FileExplorerContextMenuID@@': contextMenu?.id ?? '',
+		'@@FileExplorerContextMenuCLSID@@': contextMenu?.clsid ?? '',
+		'@@FileExplorerContextMenuDLL@@': contextMenu?.dllName ?? '',
 		'@@FILE_TYPE_ASSOCIATIONS@@': buildFileTypeAssociations(),
 	};
 
@@ -251,7 +440,7 @@ function prepareMsixManifest(arch: string): string {
 	}
 
 	// Strip context menu extensions if no CLSID is configured
-	if (!contextMenuClsid) {
+	if (!contextMenu) {
 		manifest = manifest.replace(
 			/\s*<!-- @@CONTEXT_MENU_START@@ -->[\s\S]*?<!-- @@CONTEXT_MENU_END@@ -->/,
 			''
@@ -270,7 +459,7 @@ function prepareMsixManifest(arch: string): string {
  * and generating the processed AppxManifest.xml.
  */
 function prepareMsixLayout(arch: string): task.CallbackTask {
-	return (cb) => {
+	return ((cb: (err?: Error) => void) => {
 		const sourcePath = buildPath(arch);
 		const layoutPath = path.join(msixDir(arch), 'layout');
 
@@ -296,7 +485,7 @@ function prepareMsixLayout(arch: string): task.CallbackTask {
 			{ stdio: ['ignore', 'inherit', 'inherit'] }
 		);
 
-		copyProcess.on('error', cb);
+		copyProcess.on('error', err => cb(err));
 		copyProcess.on('exit', (code) => {
 			// Robocopy returns 0-7 for success conditions
 			if (code !== null && code <= 7) {
@@ -311,15 +500,13 @@ function prepareMsixLayout(arch: string): task.CallbackTask {
 					// Compile the console launcher stub that the CLI app execution alias targets
 					compileCliStub(layoutPath);
 
-					// Copy the context menu DLL if available
-					const quality = (product as ProductWithExtras).quality || 'dev';
-					const dllName = `${quality === 'stable' ? 'code' : 'code_insider'}_explorer_command_${arch}.dll`;
-					const dllSource = path.join(repoPath, '.build', 'win32', 'appx', dllName);
-					if (fs.existsSync(dllSource)) {
-						fs.copyFileSync(dllSource, path.join(layoutPath, dllName));
+					// Compile the product-specific, statically linked MSIX context menu DLL
+					const contextMenu = getMsixContextMenuConfiguration(product, arch);
+					if (contextMenu) {
+						compileMsixContextMenuDll(layoutPath, arch, contextMenu);
 					}
 
-					cb(null);
+					cb();
 				} catch (err) {
 					cb(err as Error);
 				}
@@ -327,14 +514,14 @@ function prepareMsixLayout(arch: string): task.CallbackTask {
 				cb(new Error(`robocopy returned exit code: ${code}`));
 			}
 		});
-	};
+	}) as task.CallbackTask;
 }
 
 /**
  * Runs makeappx pack to create the .msix package from the layout directory.
  */
 function packageMsix(arch: string): task.CallbackTask {
-	return (cb) => {
+	return ((cb: (err?: Error) => void) => {
 		const layoutPath = path.join(msixDir(arch), 'layout');
 		const outputPath = msixDir(arch);
 		const quality = (product as ProductWithExtras).quality || 'dev';
@@ -351,24 +538,24 @@ function packageMsix(arch: string): task.CallbackTask {
 		console.log(`Running: ${makeappxPath} ${args.join(' ')}`);
 
 		cp.spawn(makeappxPath, args, { stdio: ['ignore', 'inherit', 'inherit'] })
-			.on('error', cb)
+			.on('error', err => cb(err))
 			.on('exit', (code) => {
 				if (code === 0) {
 					console.log(`MSIX package created: ${msixFile}`);
 					// Clean up the layout directory
 					fs.rmSync(layoutPath, { recursive: true, force: true });
-					cb(null);
+					cb();
 				} else {
 					cb(new Error(`makeappx returned exit code: ${code}`));
 				}
 			});
-	};
+	}) as task.CallbackTask;
 }
 
 function defineWin32MsixTasks(arch: string) {
 	const cleanTask = util.rimraf(msixDir(arch));
 
-	gulp.task(task.define(
+	task.task(task.define(
 		`vscode-win32-${arch}-msix`,
 		task.series(cleanTask, prepareMsixLayout(arch), packageMsix(arch))
 	));
