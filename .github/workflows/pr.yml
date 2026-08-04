@@ -20,6 +20,7 @@ env:
 jobs:
   compile:
     name: Compile & Hygiene
+    if: ${{ github.repository == 'microsoft/vscode' }}
     runs-on: [ self-hosted, 1ES.Pool=1es-vscode-oss-ubuntu-22.04-x64, "JobId=compile-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
     steps:
       - name: Checkout microsoft/vscode
@@ -202,6 +203,7 @@ jobs:
 
   copilot-check-test-cache:
     name: Copilot - Check Test Cache
+    if: ${{ github.repository == 'microsoft/vscode' }}
     runs-on: [ self-hosted, 1ES.Pool=1es-vscode-oss-ubuntu-22.04-x64, "JobId=copilot-check-test-cache-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
     permissions:
       contents: read
@@ -247,6 +249,7 @@ jobs:
 
   copilot-check-telemetry:
     name: Copilot - Check Telemetry
+    if: ${{ github.repository == 'microsoft/vscode' }}
     runs-on: [ self-hosted, 1ES.Pool=1es-vscode-oss-ubuntu-22.04-x64, "JobId=copilot-check-telemetry-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
     permissions:
       contents: read
@@ -266,6 +269,7 @@ jobs:
 
   copilot-linux-tests:
     name: Copilot - Test (Linux)
+    if: ${{ github.repository == 'microsoft/vscode' }}
     runs-on: [ self-hosted, 1ES.Pool=1es-vscode-oss-ubuntu-22.04-x64, "JobId=copilot-linux-tests-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
     permissions:
       contents: read
@@ -360,6 +364,7 @@ jobs:
 
   copilot-windows-tests:
     name: Copilot - Test (Windows)
+    if: ${{ github.repository == 'microsoft/vscode' }}
     runs-on: [ self-hosted, 1ES.Pool=1es-vscode-oss-windows-2022-x64, "JobId=copilot-windows-tests-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
     permissions:
       contents: read
