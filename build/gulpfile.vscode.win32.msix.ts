@@ -397,13 +397,31 @@ function extractIconLogos(layoutPath: string): void {
 
 /**
  * Computes the MSIX-compatible version string from the package version.
- * MSIX requires 4-part version: Major.Minor.Build.Revision
- * We map npm version x.y.z to x.y.z.0
+ * MSIX requires a 4-part version: Major.Minor.Build.Revision.
+ *
+ * Windows treats a package whose version is strictly greater than the installed
+ * one as an in-place upgrade, which preserves taskbar pins, Start tiles and the
+ * running registration. If two builds of the same VS Code version both produced
+ * `x.y.z.0` they would collide, and `Add-AppxPackage` would refuse the update
+ * ("same version, different content", 0x80073CFB), forcing an uninstall +
+ * reinstall that drops the taskbar pin.
+ *
+ * To keep every local build strictly newer than the last while staying within
+ * the MSIX per-part limit (0-65535), derive Build/Revision from the current UTC
+ * build time: Build = whole days since 2000-01-01 (monotonic across days, fits
+ * until year ~2179), Revision = two-second ticks since UTC midnight (0-43199, so
+ * distinct builds more than ~2s apart never collide). Major.Minor come from the
+ * product version so a real version bump still compares greater.
  */
 function getMsixVersion(): string {
 	const rawVersion = pkg.version.replace(/-\w+$/, '');
 	const parts = rawVersion.split('.');
-	return `${parts[0]}.${parts[1]}.${parts[2]}.0`;
+	const now = new Date();
+	const epochUtc = Date.UTC(2000, 0, 1);
+	const daysSinceEpoch = Math.floor((now.getTime() - epochUtc) / 86_400_000);
+	const secondsSinceMidnight = now.getUTCHours() * 3600 + now.getUTCMinutes() * 60 + now.getUTCSeconds();
+	const revision = Math.floor(secondsSinceMidnight / 2);
+	return `${parts[0]}.${parts[1]}.${daysSinceEpoch}.${revision}`;
 }
 
 /**
